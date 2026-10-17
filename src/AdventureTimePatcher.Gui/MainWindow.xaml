@@ -95,7 +95,7 @@
                 </Grid.ColumnDefinitions>
                 <Rectangle Grid.Column="0" Height="1" Fill="#6EC6F5" VerticalAlignment="Center" Margin="70,24,12,0" />
                 <StackPanel Grid.Column="1" HorizontalAlignment="Center">
-                    <TextBlock Text="ADVENTURETIME" Foreground="#A7E2FF" FontSize="30" FontFamily="Consolas" FontWeight="Bold" HorizontalAlignment="Center" />
+                    <TextBlock x:Name="ProductTitle" Text="ADVENTURETIME" Foreground="#A7E2FF" FontSize="30" FontFamily="Consolas" FontWeight="Bold" HorizontalAlignment="Center" />
                     <TextBlock Text="INSTALLER / UPDATER" Foreground="#FFD166" FontSize="12" FontFamily="Consolas" FontWeight="Bold" HorizontalAlignment="Center" />
                 </StackPanel>
                 <Rectangle Grid.Column="2" Height="1" Fill="#6EC6F5" VerticalAlignment="Center" Margin="12,24,70,0" />
@@ -104,12 +104,16 @@
             <Grid Grid.Row="1" Margin="0,0,0,12">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
                     <ColumnDefinition Width="*" />
                     <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
-                <TextBlock Text="MacroQuest Folder" Foreground="#FFD166" VerticalAlignment="Center" Margin="0,0,10,0" />
-                <TextBox x:Name="MqDirTextBox" Grid.Column="1" Height="32" Background="#0B1B2B" Foreground="#EAF6FF" BorderBrush="#67C7F7" BorderThickness="1" Padding="8,5" TextChanged="MqDirTextBox_TextChanged" />
-                <Button Grid.Column="2" x:Name="BrowseButton" Content="Browse..." Style="{StaticResource PatcherButton}" Margin="10,0,0,0" Click="BrowseButton_Click" />
+                <TextBlock Text="Install" Foreground="#FFD166" VerticalAlignment="Center" Margin="0,0,10,0" />
+                <ComboBox x:Name="ProductCombo" Grid.Column="1" Height="32" MinWidth="130" VerticalContentAlignment="Center" Margin="0,0,16,0" SelectionChanged="ProductCombo_SelectionChanged" />
+                <TextBlock Grid.Column="2" Text="MacroQuest Folder" Foreground="#FFD166" VerticalAlignment="Center" Margin="0,0,10,0" />
+                <TextBox x:Name="MqDirTextBox" Grid.Column="3" Height="32" Background="#0B1B2B" Foreground="#EAF6FF" BorderBrush="#67C7F7" BorderThickness="1" Padding="8,5" TextChanged="MqDirTextBox_TextChanged" />
+                <Button Grid.Column="4" x:Name="BrowseButton" Content="Browse..." Style="{StaticResource PatcherButton}" Margin="10,0,0,0" Click="BrowseButton_Click" />
             </Grid>
 
             <StackPanel Grid.Row="2" Margin="0,0,0,12">

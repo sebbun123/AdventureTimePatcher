@@ -3,8 +3,6 @@ using AdventureTimePatcher.Core;
 internal static class Program
 {
     private const string Product = "AdventureTimePatcher";
-    private const string DefaultOwner = "sebbun123";
-    private const string DefaultRepo = "Adventuretime";
     private const string DefaultBranch = "main";
 
     public static async Task<int> Main(string[] args)
@@ -30,7 +28,8 @@ internal static class Program
 
         var command = args[0].ToLowerInvariant();
         var opt = Options.Parse(args.Skip(1).ToArray());
-        var service = new PatcherService();
+        var product = AdventureTimePatcher.Core.Product.Find(opt.Product);
+        var service = new PatcherService(product);
 
         if (command is "self-check" or "selfcheck")
             return SelfCheck(service);
@@ -44,7 +43,7 @@ internal static class Program
             return 2;
         }
 
-        var repo = new RepoRef(opt.Owner ?? DefaultOwner, opt.Repo ?? DefaultRepo, opt.Branch ?? DefaultBranch);
+        var repo = new RepoRef(opt.Owner ?? product.Owner, opt.Repo ?? product.Repo, opt.Branch ?? DefaultBranch);
         return command switch
         {
             "check" => await CheckAsync(service, opt.MqRoot, repo).ConfigureAwait(false),
@@ -72,8 +71,9 @@ internal static class Program
         Console.WriteLine();
         Console.WriteLine("Options:");
         Console.WriteLine("  --mq <path>       MacroQuest root folder containing lua/ and config/");
+        Console.WriteLine("  --product <name>  adventuretime (default) or lazcraft");
         Console.WriteLine("  --owner <owner>   GitHub owner override, default sebbun123");
-        Console.WriteLine("  --repo <repo>     GitHub repo override, default Adventuretime");
+        Console.WriteLine("  --repo <repo>     GitHub repo override, default the product's repo");
         Console.WriteLine("  --branch <name>   GitHub branch override, default main");
         Console.WriteLine("  --force           Allow replacing a newer local test build");
     }
@@ -162,12 +162,12 @@ internal static class Program
         var result = await service.UpdateAsync(mqRoot, repo, progress, allowLocalNewer: force).ConfigureAwait(false);
         if (result.AlreadyCurrent)
         {
-            Console.WriteLine($"[{Product}] AdventureTime is already current ({PatcherService.ShortSha(result.LatestSha)}).");
+            Console.WriteLine($"[{Product}] {service.Product.Name} is already current ({PatcherService.ShortSha(result.LatestSha)}).");
             return 0;
         }
-        Console.WriteLine($"[{Product}] Installed AdventureTime {PatcherService.ShortSha(result.LatestSha)}.");
+        Console.WriteLine($"[{Product}] Installed {service.Product.Name} {PatcherService.ShortSha(result.LatestSha)}.");
         Console.WriteLine($"MQ root: {result.MqRoot}");
-        foreach (var file in result.CopiedFiles) Console.WriteLine($"  updated {file}");
+        foreach (var file in result.CopiedFiles) Console.WriteLine(file.StartsWith("removed ") ? $"  {file}" : $"  updated {file}");
         if (!string.IsNullOrWhiteSpace(result.BackupDir)) Console.WriteLine($"Backup: {result.BackupDir}");
         return 0;
     }
@@ -180,10 +180,11 @@ internal sealed class Options
     public string? Repo { get; private init; }
     public string? Branch { get; private init; }
     public bool Force { get; private init; }
+    public string? Product { get; private init; }
 
     public static Options Parse(string[] args)
     {
-        string? mq = null, owner = null, repo = null, branch = null;
+        string? mq = null, owner = null, repo = null, branch = null, product = null;
         var force = false;
         for (var i = 0; i < args.Length; i++)
         {
@@ -198,12 +199,13 @@ internal sealed class Options
             {
                 case "--mq": mq = Next(); break;
                 case "--owner": owner = Next(); break;
+                case "--product": product = Next(); break;
                 case "--repo": repo = Next(); break;
                 case "--branch": branch = Next(); break;
                 case "--force": force = true; break;
                 default: throw new ArgumentException($"Unknown option: {a}");
             }
         }
-        return new Options { MqRoot = mq, Owner = owner, Repo = repo, Branch = branch, Force = force };
+        return new Options { MqRoot = mq, Owner = owner, Repo = repo, Branch = branch, Force = force, Product = product };
     }
 }

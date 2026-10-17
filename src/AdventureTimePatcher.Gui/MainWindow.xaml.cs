@@ -12,12 +12,10 @@ namespace AdventureTimePatcher.Gui;
 
 public partial class MainWindow : Window
 {
-    private const string DefaultOwner = "sebbun123";
-    private const string DefaultRepo = "Adventuretime";
-    private const string DefaultBranch = "main";
-
-    private readonly PatcherService _service = new();
-    private readonly RepoRef _repo = new(DefaultOwner, DefaultRepo, DefaultBranch);
+    private Product _product = Product.AdventureTime;
+    private PatcherService _service = new(Product.AdventureTime);
+    private RepoRef _repo = Product.AdventureTime.RepoRef;
+    private bool _loading = true;
     private bool _busy;
     private bool _checked;
     private bool _hasUpdate;
@@ -31,11 +29,15 @@ public partial class MainWindow : Window
         InitializeComponent();
         PatcherVersionText.Text = "Patcher v" + (Assembly.GetEntryAssembly()?.GetName().Version?.ToString(3) ?? "dev");
         MqDirTextBox.Text = GuessMqRoot();
+        foreach (var p in Product.All) ProductCombo.Items.Add(p.Name);
         ParseStartupArgs();
+        ProductCombo.SelectedIndex = Array.IndexOf(Product.All, _product);
+        SetProduct(_product);
+        _loading = false;
         AppendLog("Choose your MacroQuest folder, then Check or Update.");
         if (_startupCommand == "update")
         {
-            ActionHint.Text = "AdventureTime closed in-game. Click Update to install the latest copy.";
+            ActionHint.Text = $"{_product.Name} closed in-game. Click Update to install the latest copy.";
             _ = CheckAsync();
         }
         _ = RefreshSelfUpdateAsync();
@@ -53,6 +55,7 @@ public partial class MainWindow : Window
                 continue;
             }
             if (a == "--mq" && i + 1 < args.Length) MqDirTextBox.Text = args[++i];
+            else if (a == "--product" && i + 1 < args.Length) _product = Product.Find(args[++i]);
         }
     }
 
@@ -80,8 +83,8 @@ public partial class MainWindow : Window
             _installedSha = result.InstalledSha;
             VersionLine.Text = $"Installed {Pretty(result.InstalledSha)}   |   Latest {Pretty(result.LatestSha)}";
             PatchNotesText.Text = result.UpdateAvailable
-                ? "A newer AdventureTime copy is available from GitHub. Click Update below to install it."
-                : "AdventureTime is current. Reinstall forces a fresh copy from GitHub.";
+                ? $"A newer {_product.Name} copy is available from GitHub. Click Update below to install it."
+                : $"{_product.Name} is current. Reinstall forces a fresh copy from GitHub.";
             if (result.UpdateAvailable)
             {
                 StatusLine.Text = "Update ready";
@@ -89,7 +92,7 @@ public partial class MainWindow : Window
                 ActionButton.Content = "Update Now";
                 ActionButton.Background = BrushOf(0x8F, 0xD3, 0xFF);
                 ActionButton.Foreground = BrushOf(0x06, 0x15, 0x22);
-                ActionHint.Text = "Click Update Now, then restart AdventureTime in-game.";
+                ActionHint.Text = $"Click Update Now, then restart {_product.Name} in-game ({_product.RunHint}).";
                 AppendLog("Update available.");
             }
             else
@@ -99,8 +102,8 @@ public partial class MainWindow : Window
                 ActionButton.Content = "Reinstall / Recheck";
                 ActionButton.Background = BrushOf(0x15, 0x30, 0x44);
                 ActionButton.Foreground = BrushOf(0xEA, 0xF6, 0xFF);
-                ActionHint.Text = "AdventureTime is current. Reinstall forces a fresh copy from GitHub.";
-                AppendLog("AdventureTime is up to date.");
+                ActionHint.Text = $"{_product.Name} is current. Reinstall forces a fresh copy from GitHub.";
+                AppendLog($"{_product.Name} is up to date.");
             }
         });
     }
@@ -123,21 +126,21 @@ public partial class MainWindow : Window
                 ActionButton.Content = "Reinstall / Recheck";
                 ActionButton.Background = BrushOf(0x15, 0x30, 0x44);
                 ActionButton.Foreground = BrushOf(0xEA, 0xF6, 0xFF);
-                PatchNotesText.Text = "AdventureTime was installed from GitHub. Restart AdventureTime in-game.";
-                if (result.AlreadyCurrent) AppendLog("AdventureTime is already current.");
+                PatchNotesText.Text = $"{_product.Name} was installed from GitHub. Restart it in-game: {_product.RunHint}";
+                if (result.AlreadyCurrent) AppendLog($"{_product.Name} is already current.");
                 else
                 {
-                    AppendLog($"Installed AdventureTime {PatcherService.ShortSha(result.LatestSha)}.");
-                    foreach (var f in result.CopiedFiles) AppendLog("Updated " + f);
+                    AppendLog($"Installed {_product.Name} {PatcherService.ShortSha(result.LatestSha)}.");
+                    foreach (var f in result.CopiedFiles) AppendLog(f.StartsWith("removed ") ? "Removed " + f[8..] : "Updated " + f);
                     if (!string.IsNullOrWhiteSpace(result.BackupDir)) AppendLog("Backup: " + result.BackupDir);
                 }
-                AppendLog("Done. You can start AdventureTime again in MacroQuest.");
+                AppendLog($"Done. You can start {_product.Name} again in MacroQuest: {_product.RunHint}");
             }
             catch (LocalBuildNewerException ex) when (!allowLocalNewer)
             {
                 var answer = System.Windows.MessageBox.Show(
                     this,
-                    "The installed AdventureTime file appears newer than GitHub.\n\n" +
+                    $"The installed {_product.Name} file appears newer than GitHub.\n\n" +
                     $"Installed: {ex.LocalBuild.Display}\nGitHub: {ex.RemoteBuild.Display}\n\n" +
                     "Updating may replace local test changes. Continue anyway?",
                     "AdventureTime Patcher",
@@ -265,6 +268,7 @@ public partial class MainWindow : Window
     {
         _busy = busy;
         BrowseButton.IsEnabled = !busy;
+        ProductCombo.IsEnabled = !busy;
         MqDirTextBox.IsEnabled = !busy;
         ActionButton.IsEnabled = !busy;
         if (SelfUpdateButton != null) SelfUpdateButton.IsEnabled = !busy;
@@ -292,7 +296,31 @@ public partial class MainWindow : Window
             DragMove();
     }
 
+    private void ProductCombo_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+    {
+        if (_loading || ProductCombo.SelectedIndex < 0) return;
+        SetProduct(Product.All[ProductCombo.SelectedIndex]);
+        AppendLog($"Installing {_product.Name} into lua\\{_product.Folder}.");
+    }
+
+    private void SetProduct(Product product)
+    {
+        _product = product;
+        _service = new PatcherService(product);
+        _repo = product.RepoRef;
+        ProductTitle.Text = product.Name.ToUpperInvariant();
+        VersionLine.Text = "Installed unknown   |   Latest unknown";
+        StatusLine.Text = "Pick your MacroQuest folder.";
+        PatchNotesText.Text = "Check GitHub for update details.";
+        ResetCheck();
+    }
+
     private void MqDirTextBox_TextChanged(object sender, System.Windows.Controls.TextChangedEventArgs e)
+    {
+        ResetCheck();
+    }
+
+    private void ResetCheck()
     {
         _checked = false;
         _hasUpdate = false;
@@ -316,6 +344,8 @@ public partial class MainWindow : Window
         var parts = new List<string>();
         if (!string.IsNullOrWhiteSpace(_startupCommand))
             parts.Add(QuoteForCmd(_startupCommand));
+        parts.Add("--product");
+        parts.Add(QuoteForCmd(_product.Key));
         var mq = MqDirTextBox.Text;
         if (!string.IsNullOrWhiteSpace(mq))
         {

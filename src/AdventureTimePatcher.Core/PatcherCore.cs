@@ -10,6 +10,39 @@ public sealed record RepoRef(string Owner, string Name, string Branch)
     public string ZipUrl => $"https://github.com/{Owner}/{Name}/archive/refs/heads/{Uri.EscapeDataString(Branch)}.zip";
 }
 
+// WHAT THE PATCHER CAN INSTALL (1.1.0). Each product is a GitHub repo with a manifest.txt and a folder under lua/.
+public sealed record Product(
+    string Key, string Name, string Owner, string Repo, string Folder,
+    string MarkerFile, string StatusFile, string BackupRoot,
+    string[] ProtectedPrefixes, string[] ProtectedFiles,
+    bool HasTargetsIni, bool CompareBuilds, bool WriteInstalledTxt, string RunHint)
+{
+    public RepoRef RepoRef => new(Owner, Repo, "main");
+
+    public static readonly Product AdventureTime = new(
+        "adventuretime", "AdventureTime", "sebbun123", "Adventuretime", "adventuretime",
+        "adventuretime_install.json", "adventuretime_update_status.json", "AdventureTimePatcher_backup",
+        new[] { "settings/", "logs/", "backup-" }, new[] { "AdventureTime_targets.ini" },
+        HasTargetsIni: true, CompareBuilds: true, WriteInstalledTxt: false,
+        RunHint: "/lua run adventuretime");
+
+    // LazCraft keeps per-character Settings/ and logs inside its own folder; its INIs are published files
+    // (update.bat brings them current too). installed.txt is what its Settings tab reads for the versions.
+    public static readonly Product LazCraft = new(
+        "lazcraft", "LazCraft", "sebbun123", "LazCraft", "Lazcraft",
+        "lazcraft_install.json", "lazcraft_update_status.json", "LazCraftPatcher_backup",
+        new[] { "settings/", "logs/", "backup-" }, new[] { "installed.txt" },
+        HasTargetsIni: false, CompareBuilds: false, WriteInstalledTxt: true,
+        RunHint: "/lua run Lazcraft");
+
+    public static readonly Product[] All = { AdventureTime, LazCraft };
+
+    public static Product Find(string? key) =>
+        All.FirstOrDefault(p => string.Equals(p.Key, key, StringComparison.OrdinalIgnoreCase)
+                                || string.Equals(p.Name, key, StringComparison.OrdinalIgnoreCase))
+        ?? AdventureTime;
+}
+
 public sealed record InstallMarker(string Owner, string Repo, string Branch, string Sha, DateTimeOffset InstalledAtUtc);
 
 public sealed record UpdateStatus(string Owner, string Repo, string Branch, string LatestSha, string InstalledSha, bool UpdateAvailable, string Status, DateTimeOffset CheckedAtUtc, string Error);
@@ -31,7 +64,7 @@ public sealed class LocalBuildNewerException : Exception
     public AdventureTimeBuild RemoteBuild { get; }
 
     public LocalBuildNewerException(AdventureTimeBuild localBuild, AdventureTimeBuild remoteBuild)
-        : base($"Installed AdventureTime appears newer than GitHub. Installed: {localBuild.Display}; GitHub: {remoteBuild.Display}.")
+        : base($"The installed copy appears newer than GitHub. Installed: {localBuild.Display}; GitHub: {remoteBuild.Display}.")
     {
         LocalBuild = localBuild;
         RemoteBuild = remoteBuild;
@@ -40,8 +73,11 @@ public sealed class LocalBuildNewerException : Exception
 
 public sealed class PatcherService
 {
-    public const string MarkerFileName = "adventuretime_install.json";
-    public const string StatusFileName = "adventuretime_update_status.json";
+    public Product Product { get; }
+    public PatcherService(Product? product = null) { Product = product ?? Product.AdventureTime; }
+    private string MarkerFileName => Product.MarkerFile;
+    private string StatusFileName => Product.StatusFile;
+    private string LuaPrefix => "lua/" + Product.Folder.ToLowerInvariant() + "/";
     private const string PatcherOwner = "sebbun123";
     private const string PatcherRepo = "AdventureTimePatcher";
     private const string PatcherLatestApi = $"https://api.github.com/repos/{PatcherOwner}/{PatcherRepo}/releases/latest";
@@ -52,12 +88,6 @@ public sealed class PatcherService
 
     // AdventureTime is more than init.lua since 1.22 (modules/*.lua). What gets installed is whatever the repo's
     // manifest.txt lists, so a new module never needs a patcher change. User data is never written.
-    private const string LuaPrefix = "lua/adventuretime/";
-    private static readonly string[] ProtectedPrefixes = { "settings/", "logs/", "backup-" };
-    private static readonly HashSet<string> ProtectedFiles = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "AdventureTime_targets.ini",
-    };
 
     public sealed record ManifestEntry(string Path, string Sha, bool Delete);
 
@@ -141,18 +171,18 @@ public sealed class PatcherService
         {
             var zipPath = Path.Combine(tempRoot, "source.zip");
             var extractPath = Path.Combine(tempRoot, "source");
-            progress?.Report("Downloading AdventureTime...");
+            progress?.Report($"Downloading {Product.Name}...");
             await DownloadFileAsync(http, repo.ZipUrl, zipPath, ct).ConfigureAwait(false);
             progress?.Report("Extracting package...");
             ZipFile.ExtractToDirectory(zipPath, extractPath);
 
             var sourceRoot = FindSourceRoot(extractPath);
-            var luaDir = Path.Combine(mqRoot, "lua", "adventuretime");
+            var luaDir = ResolveLuaDir(mqRoot);
             var localInit = Path.Combine(luaDir, "init.lua");
             var remoteInit = Path.Combine(sourceRoot, "init.lua");
             var localBuild = ReadAdventureTimeBuild(localInit);
             var remoteBuild = ReadAdventureTimeBuild(remoteInit);
-            if (!allowLocalNewer && IsLocalBuildNewer(localBuild, remoteBuild))
+            if (!allowLocalNewer && Product.CompareBuilds && IsLocalBuildNewer(localBuild, remoteBuild))
             {
                 WriteUpdateStatus(mqRoot, repo, latestSha, marker?.Sha, true, "local_newer");
                 throw new LocalBuildNewerException(localBuild, remoteBuild);
@@ -161,7 +191,7 @@ public sealed class PatcherService
             Directory.CreateDirectory(luaDir);
             Directory.CreateDirectory(configDir);
 
-            var backupDir = Path.Combine(configDir, "AdventureTimePatcher_backup", DateTime.Now.ToString("yyyyMMdd_HHmmss"));
+            var backupDir = Path.Combine(configDir, Product.BackupRoot, DateTime.Now.ToString("yyyyMMdd_HHmmss"));
             var copied = new List<string>();
 
             var manifest = ReadManifestFile(Path.Combine(sourceRoot, "manifest.txt"));
@@ -203,7 +233,7 @@ public sealed class PatcherService
                 CopyOverwriteWithBackup(readme, Path.Combine(luaDir, "README.md"), backupDir, LuaPrefix + "README.md", copied, "README.md");
 
             var targetsSrc = Path.Combine(sourceRoot, "AdventureTime_targets.ini");
-            if (File.Exists(targetsSrc))
+            if (Product.HasTargetsIni && File.Exists(targetsSrc))
             {
                 var targetsDst = Path.Combine(luaDir, "AdventureTime_targets.ini");
                 if (File.Exists(targetsDst))
@@ -218,9 +248,15 @@ public sealed class PatcherService
                 }
             }
 
+            if (Product.WriteInstalledTxt)
+            {
+                var (build, config) = ReadManifestStamps(Path.Combine(sourceRoot, "manifest.txt"));
+                File.WriteAllText(Path.Combine(luaDir, "installed.txt"),
+                    $"# {Product.Name} - written by AdventureTimePatcher. Do not edit.\r\n# build {build}\r\n# config {config}\r\n");
+            }
             WriteMarker(mqRoot, new InstallMarker(repo.Owner, repo.Name, repo.Branch, latestSha, DateTimeOffset.UtcNow));
             WriteUpdateStatus(mqRoot, repo, latestSha, latestSha, false, "up_to_date");
-            PruneBackups(Path.Combine(configDir, "AdventureTimePatcher_backup"), keep: 5);
+            PruneBackups(Path.Combine(configDir, Product.BackupRoot), keep: 5);
             progress?.Report("Update complete.");
             return new UpdateResult(repo, mqRoot, latestSha, false, copied, Directory.Exists(backupDir) ? backupDir : null);
         }
@@ -392,7 +428,7 @@ public sealed class PatcherService
         throw new FileNotFoundException("Downloaded source did not contain init.lua at the repository root.");
     }
 
-    private static void CopyOverwriteWithBackup(string source, string destination, string backupDir, string displayPath, List<string> copied, string? relPath = null)
+    private void CopyOverwriteWithBackup(string source, string destination, string backupDir, string displayPath, List<string> copied, string? relPath = null)
     {
         EnsureManagedLuaFile(displayPath);
         if (!File.Exists(source)) throw new FileNotFoundException($"Required source file missing: {source}");
@@ -410,17 +446,17 @@ public sealed class PatcherService
         copied.Add(displayPath);
     }
 
-    private static void EnsureManagedLuaFile(string displayPath)
+    private void EnsureManagedLuaFile(string displayPath)
     {
         var normalized = displayPath.Replace('\\', '/');
         var ok = normalized.StartsWith(LuaPrefix, StringComparison.OrdinalIgnoreCase);
         var rel = ok ? normalized[LuaPrefix.Length..] : string.Empty;
         if (ok && (rel.Length == 0 || rel.StartsWith('/') || rel.Contains(':') || rel.Split('/').Any(p => p is "" or "." or "..")))
             ok = false;
-        if (ok && ProtectedFiles.Contains(rel)) ok = false;
-        if (ok && ProtectedPrefixes.Any(p => rel.StartsWith(p, StringComparison.OrdinalIgnoreCase))) ok = false;
+        if (ok && Product.ProtectedFiles.Contains(rel, StringComparer.OrdinalIgnoreCase)) ok = false;
+        if (ok && Product.ProtectedPrefixes.Any(p => rel.StartsWith(p, StringComparison.OrdinalIgnoreCase))) ok = false;
         if (!ok)
-            throw new InvalidOperationException($"Refusing to overwrite unmanaged AdventureTime file: {displayPath}");
+            throw new InvalidOperationException($"Refusing to overwrite unmanaged {Product.Name} file: {displayPath}");
     }
 
     public static List<ManifestEntry> ParseManifest(string text)
@@ -437,6 +473,34 @@ public sealed class PatcherService
         return list;
     }
 
+    // build and config stamps from a manifest ("(unversioned)" / "" when absent), as LazCraft's update.bat records them.
+    private static (string Build, string Config) ReadManifestStamps(string path)
+    {
+        string build = "(unversioned)", config = "";
+        if (!File.Exists(path)) return (build, config);
+        foreach (var raw in File.ReadAllLines(path))
+        {
+            var p = raw.Trim().Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+            if (p.Length >= 2 && p[0] == "build") build = p[1];
+            else if (p.Length >= 2 && p[0] == "config") config = p[1];
+        }
+        return (build, config);
+    }
+
+    // The product's folder under lua/, matched without regard to case (Lazcraft vs lazcraft) so an existing
+    // install is updated in place - Linux/Wine paths are case-sensitive. A new install uses Product.Folder.
+    public string ResolveLuaDir(string mqRoot)
+    {
+        var lua = Path.Combine(mqRoot, "lua");
+        if (Directory.Exists(lua))
+        {
+            var hit = Directory.GetDirectories(lua)
+                .FirstOrDefault(d => string.Equals(Path.GetFileName(d), Product.Folder, StringComparison.OrdinalIgnoreCase));
+            if (hit != null) return hit;
+        }
+        return Path.Combine(lua, Product.Folder);
+    }
+
     private static List<ManifestEntry> ReadManifestFile(string path) =>
         File.Exists(path) ? ParseManifest(File.ReadAllText(path)) : new List<ManifestEntry>();
 
@@ -448,9 +512,9 @@ public sealed class PatcherService
 
     // The manifest.txt of that commit, compared with what is installed. The files that are missing or
     // different; empty when they all match, or when the manifest cannot be read (nothing to go on).
-    public static List<string> CompareInstall(string mqRoot, IEnumerable<ManifestEntry> manifest)
+    public List<string> CompareInstall(string mqRoot, IEnumerable<ManifestEntry> manifest)
     {
-        var luaDir = Path.Combine(mqRoot, "lua", "adventuretime");
+        var luaDir = ResolveLuaDir(mqRoot);
         var bad = new List<string>();
         foreach (var e in manifest)
         {
@@ -462,7 +526,7 @@ public sealed class PatcherService
         return bad;
     }
 
-    private static async Task<List<string>> LocalFilesDifferAsync(HttpClient http, RepoRef repo, string sha, string mqRoot, CancellationToken ct)
+    private async Task<List<string>> LocalFilesDifferAsync(HttpClient http, RepoRef repo, string sha, string mqRoot, CancellationToken ct)
     {
         try
         {
@@ -476,14 +540,14 @@ public sealed class PatcherService
         }
     }
 
-    private static void WriteMarker(string mqRoot, InstallMarker marker)
+    private void WriteMarker(string mqRoot, InstallMarker marker)
     {
         var configDir = Path.Combine(mqRoot, "config");
         Directory.CreateDirectory(configDir);
         File.WriteAllText(Path.Combine(configDir, MarkerFileName), JsonSerializer.Serialize(marker, JsonOptions));
     }
 
-    private static void WriteUpdateStatus(string mqRoot, RepoRef repo, string latestSha, string? installedSha, bool updateAvailable, string status)
+    private void WriteUpdateStatus(string mqRoot, RepoRef repo, string latestSha, string? installedSha, bool updateAvailable, string status)
     {
         var configDir = Path.Combine(mqRoot, "config");
         Directory.CreateDirectory(configDir);
