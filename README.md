@@ -39,9 +39,11 @@ The MQ root is the folder that contains `lua/` and `config/`. Under Lutris/Wine,
 ## What update does
 
 - Downloads the latest `main` branch from `sebbun123/Adventuretime`.
-- Only installs/updates these managed files:
-  - `lua/adventuretime/init.lua`
-  - `lua/adventuretime/README.md`
+- Installs every file listed in the repo's `manifest.txt` (`init.lua`, `modules/*.lua`, ...) plus `README.md`,
+  each checked against its SHA-256 before anything is replaced. A bad download changes nothing.
+- "Up to date" means the latest commit is installed **and** every manifest file is present and matches, so an
+  install missing its `modules` folder is repaired on the next update.
+- Never writes `Settings/`, `Logs/` or `AdventureTime_targets.ini`, and refuses any path outside `lua/adventuretime/`.
 - Preserves an existing `lua/adventuretime/AdventureTime_targets.ini`.
 - If targets already exist, writes the repo copy as `AdventureTime_targets.ini.example`.
 - Does not delete or replace the full `lua/adventuretime/` folder.

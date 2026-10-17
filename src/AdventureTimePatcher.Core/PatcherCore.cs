@@ -50,13 +50,16 @@ public sealed class PatcherService
 
     public static string PatcherDownloadUrl => OperatingSystem.IsWindows() ? PatcherDownloadUrlWindows : PatcherDownloadUrlLinux;
 
-    private static readonly HashSet<string> ManagedLuaFiles = new(StringComparer.OrdinalIgnoreCase)
+    // AdventureTime is more than init.lua since 1.22 (modules/*.lua). What gets installed is whatever the repo's
+    // manifest.txt lists, so a new module never needs a patcher change. User data is never written.
+    private const string LuaPrefix = "lua/adventuretime/";
+    private static readonly string[] ProtectedPrefixes = { "settings/", "logs/", "backup-" };
+    private static readonly HashSet<string> ProtectedFiles = new(StringComparer.OrdinalIgnoreCase)
     {
-        "lua/adventuretime/init.lua",
-        "lua/adventuretime/README.md",
-        "lua/adventuretime/AdventureTime_targets.ini",
-        "lua/adventuretime/AdventureTime_targets.ini.example",
+        "AdventureTime_targets.ini",
     };
+
+    public sealed record ManifestEntry(string Path, string Sha, bool Delete);
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -106,7 +109,8 @@ public sealed class PatcherService
         var latestSha = await GetLatestCommitShaAsync(http, repo, ct).ConfigureAwait(false);
         var marker = ReadMarker(mqRoot);
         var installedSha = marker?.Sha ?? string.Empty;
-        var available = installedSha != latestSha;
+        var available = installedSha != latestSha
+            || (await LocalFilesDifferAsync(http, repo, latestSha, mqRoot, ct).ConfigureAwait(false)).Count > 0;
         WriteUpdateStatus(mqRoot, repo, latestSha, installedSha, available, available ? "update_available" : "up_to_date");
         return new CheckResult(repo, mqRoot, latestSha, installedSha, available);
     }
@@ -119,7 +123,13 @@ public sealed class PatcherService
         var latestSha = await GetLatestCommitShaAsync(http, repo, ct).ConfigureAwait(false);
         var marker = ReadMarker(mqRoot);
 
-        if (marker?.Sha == latestSha)
+        // SAME COMMIT IS NOT ENOUGH: an install from patcher 1.0.4 or earlier has init.lua but no modules.
+        var differ = marker?.Sha == latestSha
+            ? await LocalFilesDifferAsync(http, repo, latestSha, mqRoot, ct).ConfigureAwait(false)
+            : new List<string>();
+        if (differ.Count > 0)
+            progress?.Report("Installed files are missing or different: " + string.Join(", ", differ));
+        if (marker?.Sha == latestSha && differ.Count == 0)
         {
             WriteUpdateStatus(mqRoot, repo, latestSha, marker?.Sha, false, "up_to_date");
             return new UpdateResult(repo, mqRoot, latestSha, true, Array.Empty<string>(), null);
@@ -154,8 +164,43 @@ public sealed class PatcherService
             var backupDir = Path.Combine(configDir, "AdventureTimePatcher_backup", DateTime.Now.ToString("yyyyMMdd_HHmmss"));
             var copied = new List<string>();
 
-            CopyOverwriteWithBackup(remoteInit, Path.Combine(luaDir, "init.lua"), backupDir, "lua/adventuretime/init.lua", copied);
-            CopyOverwriteWithBackup(Path.Combine(sourceRoot, "README.md"), Path.Combine(luaDir, "README.md"), backupDir, "lua/adventuretime/README.md", copied);
+            var manifest = ReadManifestFile(Path.Combine(sourceRoot, "manifest.txt"));
+            if (manifest.Count == 0)
+            {
+                // No manifest in the repo: init.lua plus every modules/*.lua beside it.
+                manifest.Add(new ManifestEntry("init.lua", string.Empty, false));
+                var modDir = Path.Combine(sourceRoot, "modules");
+                if (Directory.Exists(modDir))
+                    foreach (var f in Directory.GetFiles(modDir, "*.lua").OrderBy(f => f, StringComparer.Ordinal))
+                        manifest.Add(new ManifestEntry("modules/" + Path.GetFileName(f), string.Empty, false));
+            }
+            // ALL OR NOTHING: every file is checked against its hash before anything in the install is touched.
+            foreach (var e in manifest.Where(e => !e.Delete))
+            {
+                EnsureManagedLuaFile(LuaPrefix + e.Path);
+                var src = Path.Combine(sourceRoot, e.Path);
+                if (!File.Exists(src)) throw new FileNotFoundException($"The download is missing {e.Path} (listed in manifest.txt).");
+                if (e.Sha.Length > 0 && !string.Equals(Sha256(src), e.Sha, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException($"Checksum mismatch on {e.Path} - nothing was changed.");
+            }
+            foreach (var e in manifest)
+            {
+                var dst = Path.Combine(luaDir, e.Path);
+                if (e.Delete)
+                {
+                    EnsureManagedLuaFile(LuaPrefix + e.Path);
+                    if (!File.Exists(dst)) continue;
+                    var bk = Path.Combine(backupDir, e.Path);
+                    Directory.CreateDirectory(Path.GetDirectoryName(bk)!);
+                    File.Move(dst, bk, overwrite: true);
+                    copied.Add("removed " + LuaPrefix + e.Path);
+                    continue;
+                }
+                CopyOverwriteWithBackup(Path.Combine(sourceRoot, e.Path), dst, backupDir, LuaPrefix + e.Path, copied, e.Path);
+            }
+            var readme = Path.Combine(sourceRoot, "README.md");
+            if (File.Exists(readme) && !manifest.Any(e => string.Equals(e.Path, "README.md", StringComparison.OrdinalIgnoreCase)))
+                CopyOverwriteWithBackup(readme, Path.Combine(luaDir, "README.md"), backupDir, LuaPrefix + "README.md", copied, "README.md");
 
             var targetsSrc = Path.Combine(sourceRoot, "AdventureTime_targets.ini");
             if (File.Exists(targetsSrc))
@@ -163,13 +208,11 @@ public sealed class PatcherService
                 var targetsDst = Path.Combine(luaDir, "AdventureTime_targets.ini");
                 if (File.Exists(targetsDst))
                 {
-                    EnsureManagedLuaFile("lua/adventuretime/AdventureTime_targets.ini.example");
                     File.Copy(targetsSrc, Path.Combine(luaDir, "AdventureTime_targets.ini.example"), overwrite: true);
                     copied.Add("lua/adventuretime/AdventureTime_targets.ini.example");
                 }
                 else
                 {
-                    EnsureManagedLuaFile("lua/adventuretime/AdventureTime_targets.ini");
                     File.Copy(targetsSrc, targetsDst);
                     copied.Add("lua/adventuretime/AdventureTime_targets.ini");
                 }
@@ -349,7 +392,7 @@ public sealed class PatcherService
         throw new FileNotFoundException("Downloaded source did not contain init.lua at the repository root.");
     }
 
-    private static void CopyOverwriteWithBackup(string source, string destination, string backupDir, string displayPath, List<string> copied)
+    private static void CopyOverwriteWithBackup(string source, string destination, string backupDir, string displayPath, List<string> copied, string? relPath = null)
     {
         EnsureManagedLuaFile(displayPath);
         if (!File.Exists(source)) throw new FileNotFoundException($"Required source file missing: {source}");
@@ -358,7 +401,9 @@ public sealed class PatcherService
         if (File.Exists(destination))
         {
             Directory.CreateDirectory(backupDir);
-            File.Copy(destination, Path.Combine(backupDir, Path.GetFileName(destination)), overwrite: true);
+            var bk = Path.Combine(backupDir, relPath ?? Path.GetFileName(destination));
+            Directory.CreateDirectory(Path.GetDirectoryName(bk)!);
+            File.Copy(destination, bk, overwrite: true);
         }
 
         File.Copy(source, destination, overwrite: true);
@@ -368,8 +413,67 @@ public sealed class PatcherService
     private static void EnsureManagedLuaFile(string displayPath)
     {
         var normalized = displayPath.Replace('\\', '/');
-        if (!ManagedLuaFiles.Contains(normalized))
+        var ok = normalized.StartsWith(LuaPrefix, StringComparison.OrdinalIgnoreCase);
+        var rel = ok ? normalized[LuaPrefix.Length..] : string.Empty;
+        if (ok && (rel.Length == 0 || rel.StartsWith('/') || rel.Contains(':') || rel.Split('/').Any(p => p is "" or "." or "..")))
+            ok = false;
+        if (ok && ProtectedFiles.Contains(rel)) ok = false;
+        if (ok && ProtectedPrefixes.Any(p => rel.StartsWith(p, StringComparison.OrdinalIgnoreCase))) ok = false;
+        if (!ok)
             throw new InvalidOperationException($"Refusing to overwrite unmanaged AdventureTime file: {displayPath}");
+    }
+
+    public static List<ManifestEntry> ParseManifest(string text)
+    {
+        var list = new List<ManifestEntry>();
+        foreach (var raw in text.Split('\n'))
+        {
+            var t = raw.Trim();
+            if (t.Length == 0 || t.StartsWith('#')) continue;
+            var p = t.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+            if (p[0] == "file" && p.Length >= 3) list.Add(new ManifestEntry(p[1].Replace('\\', '/'), p[2].ToLowerInvariant(), false));
+            else if (p[0] == "delete" && p.Length >= 2) list.Add(new ManifestEntry(p[1].Replace('\\', '/'), string.Empty, true));
+        }
+        return list;
+    }
+
+    private static List<ManifestEntry> ReadManifestFile(string path) =>
+        File.Exists(path) ? ParseManifest(File.ReadAllText(path)) : new List<ManifestEntry>();
+
+    private static string Sha256(string path)
+    {
+        using var fs = File.OpenRead(path);
+        return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(fs)).ToLowerInvariant();
+    }
+
+    // The manifest.txt of that commit, compared with what is installed. The files that are missing or
+    // different; empty when they all match, or when the manifest cannot be read (nothing to go on).
+    public static List<string> CompareInstall(string mqRoot, IEnumerable<ManifestEntry> manifest)
+    {
+        var luaDir = Path.Combine(mqRoot, "lua", "adventuretime");
+        var bad = new List<string>();
+        foreach (var e in manifest)
+        {
+            var p = Path.Combine(luaDir, e.Path);
+            if (e.Delete) { if (File.Exists(p)) bad.Add(e.Path); continue; }
+            if (!File.Exists(p)) { bad.Add(e.Path); continue; }
+            if (e.Sha.Length > 0 && !string.Equals(Sha256(p), e.Sha, StringComparison.OrdinalIgnoreCase)) bad.Add(e.Path);
+        }
+        return bad;
+    }
+
+    private static async Task<List<string>> LocalFilesDifferAsync(HttpClient http, RepoRef repo, string sha, string mqRoot, CancellationToken ct)
+    {
+        try
+        {
+            var url = $"https://raw.githubusercontent.com/{repo.Owner}/{repo.Name}/{sha}/manifest.txt";
+            var text = await http.GetStringAsync(url, ct).ConfigureAwait(false);
+            return CompareInstall(mqRoot, ParseManifest(text));
+        }
+        catch
+        {
+            return new List<string>();
+        }
     }
 
     private static void WriteMarker(string mqRoot, InstallMarker marker)
