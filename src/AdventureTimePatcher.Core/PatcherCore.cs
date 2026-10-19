@@ -85,6 +85,21 @@ public sealed class PatcherService
     private const string PatcherDownloadUrlLinux = $"https://github.com/{PatcherOwner}/{PatcherRepo}/releases/latest/download/AdventureTimePatcher-linux-x64";
 
     public static string PatcherDownloadUrl => OperatingSystem.IsWindows() ? PatcherDownloadUrlWindows : PatcherDownloadUrlLinux;
+    private static string PatcherAssetName => OperatingSystem.IsWindows() ? "AdventureTimePatcher-win-x64.exe" : "AdventureTimePatcher-linux-x64";
+
+    // The asset's download URL when the release lists it as fully uploaded; null while it is missing or still uploading.
+    internal static string? UploadedAssetUrl(JsonElement release, string assetName)
+    {
+        if (!release.TryGetProperty("assets", out var assets) || assets.ValueKind != JsonValueKind.Array) return null;
+        foreach (var a in assets.EnumerateArray())
+        {
+            if (!a.TryGetProperty("name", out var n) || !string.Equals(n.GetString(), assetName, StringComparison.OrdinalIgnoreCase)) continue;
+            if (a.TryGetProperty("state", out var st) && !string.Equals(st.GetString(), "uploaded", StringComparison.OrdinalIgnoreCase)) return null;
+            if (a.TryGetProperty("size", out var sz) && sz.ValueKind == JsonValueKind.Number && sz.GetInt64() <= 0) return null;
+            return a.TryGetProperty("browser_download_url", out var u) ? u.GetString() : null;
+        }
+        return null;
+    }
 
     // AdventureTime is more than init.lua since 1.22 (modules/*.lua). What gets installed is whatever the repo's
     // manifest.txt lists, so a new module never needs a patcher change. User data is never written.
@@ -124,7 +139,14 @@ public sealed class PatcherService
                 return new SelfUpdateResult(false, localStr, latestStr, PatcherDownloadUrl);
             var localCmp = new Version(local.Major, local.Minor, Math.Max(local.Build, 0));
             var latestCmp = new Version(latest.Major, latest.Minor, Math.Max(latest.Build, 0));
-            return new SelfUpdateResult(latestCmp > localCmp, localStr, latestStr, PatcherDownloadUrl);
+            if (latestCmp <= localCmp)
+                return new SelfUpdateResult(false, localStr, latestStr, PatcherDownloadUrl);
+            // Only offer the update once the release actually carries this platform's file. A release published
+            // before its assets finish uploading has the new tag but nothing to download yet (404).
+            var assetUrl = UploadedAssetUrl(doc.RootElement, PatcherAssetName);
+            if (assetUrl is null)
+                return new SelfUpdateResult(false, localStr, latestStr, PatcherDownloadUrl);
+            return new SelfUpdateResult(true, localStr, latestStr, assetUrl);
         }
         catch
         {
